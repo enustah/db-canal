@@ -243,7 +243,9 @@ egress:
       idColumn:
         test: id          #表示 test表的id字段名id
         fake_tb: fake_id  #表示 fake_tb表的id字段名fake_id
-
+      #是否忽略删除不存在文档的错误
+      ignoreDelete404: true 
+      
       username: fake
       password: fake
       numWorkers: 1

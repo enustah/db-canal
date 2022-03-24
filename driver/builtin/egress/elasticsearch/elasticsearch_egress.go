@@ -15,7 +15,6 @@ import (
 	"github.com/enustah/db-canal/register"
 	"github.com/enustah/db-canal/util"
 	"github.com/mitchellh/mapstructure"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -29,7 +28,8 @@ func init() {
 
 type esEgressOption struct {
 	// map<table_name>idColumnName, require
-	IDColumn map[string]string `mapstructure:"idColumn"`
+	IDColumn        map[string]string `mapstructure:"idColumn"`
+	IgnoreDelete404 bool              `mapstructure:"ignoreDelete404"`
 	// the follow option relate to esutil.BulkIndexerConfig
 	NumWorkers    int    `mapstructure:"numWorkers"`
 	FlushBytes    int    `mapstructure:"flushBytes"`
@@ -46,9 +46,11 @@ type esEgressOption struct {
 }
 
 type ElasticsearchEgress struct {
-	ctx      context.Context
-	client   *elasticsearch.Client
-	idColumn map[string]string
+	driverName      string
+	ctx             context.Context
+	client          *elasticsearch.Client
+	idColumn        map[string]string
+	ignoreDelete404 bool
 
 	FlushBytes    int
 	FlushInterval time.Duration
@@ -95,10 +97,12 @@ func (e *ElasticsearchEgress) Init(config config.EgressConfig) error {
 	}
 
 	e.ctx = context.Background()
+	e.driverName = config.Driver
 	e.FlushInterval = flushInterval
 	e.FlushBytes = option.FlushBytes
 	e.NumWorkers = option.NumWorkers
 	e.idColumn = option.IDColumn
+	e.ignoreDelete404 = option.IgnoreDelete404
 	e.client, err = elasticsearch.NewClient(elasticsearch.Config{
 		Addresses:    addr,
 		Username:     option.Username,
@@ -124,33 +128,26 @@ func (e *ElasticsearchEgress) Start() error {
 }
 
 func (e *ElasticsearchEgress) WriteData(dataBatch []*driver.Data) error {
-	data := splitData(dataBatch, e.idColumn)
-	bulk, err := esutil.NewBulkIndexer(esutil.BulkIndexerConfig{
-		Client:        e.client,
-		FlushBytes:    e.FlushBytes,
-		FlushInterval: e.FlushInterval,
-		NumWorkers:    e.NumWorkers,
-	})
+	var (
+		// count error ignore
+		ignoreFailCount uint64 = 0
+		data                   = splitData(dataBatch, e.idColumn)
+		bulk, err              = esutil.NewBulkIndexer(esutil.BulkIndexerConfig{
+			Client:        e.client,
+			FlushBytes:    e.FlushBytes,
+			FlushInterval: e.FlushInterval,
+			NumWorkers:    e.NumWorkers,
+		})
+	)
 	util.Must(err)
 	for _, v := range data {
 		for _, item := range v {
 			i := *item
 			i.OnFailure = func(_ context.Context, req esutil.BulkIndexerItem, resp esutil.BulkIndexerResponseItem, err error) {
-				b, _ := ioutil.ReadAll(req.Body)
-				errStr := ""
-				if err != nil {
-					errStr = err.Error()
-				} else {
-					errStr = resp.Error.Reason + ", " + resp.Error.Cause.Reason
+				// check fail is ignore
+				if e.isFailIgnore(&req, &resp, err) {
+					ignoreFailCount++
 				}
-				util.GetLog().
-					WithField("index", req.Index).
-					WithField("action", req.Action).
-					WithField("_id", req.DocumentID).
-					WithField("req_data", string(b)).
-					WithField("error", errStr).
-					WithField("result", resp.Result).
-					Errorf("elasticsearch write data fail")
 			}
 			bulk.Add(e.ctx, i)
 		}
@@ -160,13 +157,42 @@ func (e *ElasticsearchEgress) WriteData(dataBatch []*driver.Data) error {
 	}
 	failCount := bulk.Stats().NumFailed
 	if failCount != 0 {
-		return fmt.Errorf("es write data not all success.total: %d, fail: %d", len(dataBatch), failCount)
+		util.GetLog().WithField("driver", e.driverName).
+			Warnf("es write data not all success. total: %d, fail: %d, ignore: %d", len(dataBatch), failCount, ignoreFailCount)
+		if failCount == ignoreFailCount {
+			return nil
+		}
+		return errors.New("elasticsearch write data not all success")
 	}
 	return nil
 }
 
 func (e *ElasticsearchEgress) Stop() {
 
+}
+
+func (e *ElasticsearchEgress) isFailIgnore(req *esutil.BulkIndexerItem, resp *esutil.BulkIndexerResponseItem, err error) bool {
+	errStr := ""
+	if err != nil {
+		errStr = err.Error()
+	} else {
+		errStr = resp.Error.Reason + ", " + resp.Error.Cause.Reason
+	}
+	log := util.GetLog().
+		WithField("index", req.Index).
+		WithField("action", req.Action).
+		WithField("_id", req.DocumentID).
+		WithField("error", errStr).
+		WithField("result", resp.Result).
+		WithField("driver", e.driverName)
+
+	// ignore delete not exist doc
+	if req.Action == "delete" && resp.Status == 404 && e.ignoreDelete404 {
+		log.Warnf("elasticsearch delete a not exist doc, ignore the not found fail")
+		return true
+	}
+	log.Errorf("elasticsearch write data fail")
+	return false
 }
 
 // split data according table name
