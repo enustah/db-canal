@@ -1,0 +1,49 @@
+config:
+  - ingress:
+      #驱动名称 以内置mysql为例
+      driver: mysql_ingress
+      # mysql地址
+      dsn: "172.21.0.2:3306"
+      #驱动option 由驱动实现解释并处理
+      options:
+        username: "root"
+        password: "root"
+        # filter databases and tables
+        #只有配置的表会被同步 填正则表达式
+        #具体可以参考 https://github.com/go-mysql-org/go-mysql/blob/master/canal/config.go  IncludeTableRegex 字段的注释说明
+        tables:
+          - "test\\.test"
+          - "test\\.test2"
+
+        # the file to save the mysql log position
+        #记录保存点的文件,第一次运行没有会自动创建,如果是容器应该使用挂载目录
+        savePointFilePath: "/tmp/a"
+
+    #canal配置
+    #canal接收到数据会等待一段时间,或者等到一定数据量才会写到输出源
+    canalConfig:
+      # only debug purpose
+      name: test_mysql
+      # time to wait data batch, inspire by elasticsearch refresh. in ms. if <=0, will wait to reach maxDataBatch.
+      # canal 每批数据等待最长时间 单位毫秒, 类似elasticsearch refresh. <=0 会等待数据量直到maxDataBatch
+      maxWaitTime: 1500
+      #max data batch. 0 or 1 will write to output immediately.
+      maxDataBatch: 100
+
+      #exponential backoff config. detail can refer https://github.com/cenkalti/backoff
+      #指数时间重试option 每次失败后重试时间约等于 max(initialInterval*multiplier*n,maxInterval) n是重试次数
+      #具体可以参考 https://github.com/cenkalti/backoff
+      retryOption:
+        #最大重试间隔
+        maxInterval: 3000 # in ms
+        #重试时间倍乘因子
+        multiplier: 1.5
+        #初始时间间隔
+        initialInterval: 1000 # in ms
+
+    #输出源
+    egress:
+      - driver: clickhouse_egress
+        url: "http://172.17.0.3:9200"
+
+logLevel: "info"
