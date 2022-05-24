@@ -249,7 +249,6 @@ func convertRowEventToData(event *canal.RowsEvent, curLogName string) []*driver.
 		Name: event.Table.Schema,
 	}
 	// type map reference go-mysql-org/go-mysql@v1.4.0/replication/row_event.go
-	// all unsigned int will map to int64, it may be out of int64 range if unsigned int too big.
 	convertColumn(table, event.Table.Columns)
 	var dataEvent driver.Event
 	switch event.Action {
@@ -263,21 +262,42 @@ func convertRowEventToData(event *canal.RowsEvent, curLogName string) []*driver.
 		util.GetLog().WithField("event", event.Action).Warnf("get unknown event")
 		dataEvent = driver.EventUnknown
 	}
-	data := make([]*driver.Data, 0, len(event.Rows))
-	for _, r := range event.Rows {
-		row := make(map[string]interface{})
-		for i, v := range r {
-			column := table.Column[i]
-			row[column.Name] = convertColumnValue(column, v)
+	var (
+		data        = make([]*driver.Data, 0, len(event.Rows))
+		convertRows = func(r []interface{}) map[string]interface{} {
+			row := make(map[string]interface{})
+			for i, v := range r {
+				column := table.Column[i]
+				row[column.Name] = convertColumnValue(column, v)
+			}
+			return row
 		}
-		d := &driver.Data{
-			Event:    dataEvent,
-			RawMap:   row,
-			Table:    table,
-			Database: database,
-			Metadata: map[string]interface{}{},
+	)
+
+	// 如果是更新事件 rows分为两部分 前半部分是旧值,后半部分是新值. 具体请参考 mysql update_row_event binlog的结构
+	if dataEvent == driver.EventUpdate {
+		for i := 0; i < len(event.Rows); i += 2 {
+			d := &driver.Data{
+				Event:      dataEvent,
+				OldDataMap: convertRows(event.Rows[i]),
+				RawMap:     convertRows(event.Rows[i+1]),
+				Table:      table,
+				Database:   database,
+				Metadata:   map[string]interface{}{},
+			}
+			data = append(data, d)
 		}
-		data = append(data, d)
+	} else {
+		for _, r := range event.Rows {
+			d := &driver.Data{
+				Event:    dataEvent,
+				RawMap:   convertRows(r),
+				Table:    table,
+				Database: database,
+				Metadata: map[string]interface{}{},
+			}
+			data = append(data, d)
+		}
 	}
 	/*
 		due to row event can pick more tha one row, metadata only record the position in last row.

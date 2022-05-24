@@ -76,6 +76,8 @@ func (t *Table) DeepCopy() *Table {
 
 type Data struct {
 	Event Event
+	// 旧数据 一般update事件会返回 具体需要看驱动的实现
+	OldDataMap map[string]interface{}
 	// raw map to the data. key should be raw column string
 	RawMap   map[string]interface{}
 	Table    *Table

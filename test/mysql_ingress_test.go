@@ -15,8 +15,8 @@ import (
 const mysqlConf = `
 config:
   - ingress:
-      driver: mysql
-      dsn: "172.21.0.2:3306"
+      driver: mysql_ingress
+      dsn: "172.17.0.2:3306"
       options:
         username: "root"
         password: "root"
